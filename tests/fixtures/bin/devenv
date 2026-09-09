@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Fake devenv for tnxstor integration tests.
+if [ -n "$TNXS_TEST_LOG" ]; then echo "devenv $*" >> "$TNXS_TEST_LOG"; fi
+case "$1" in
+  gc)
+    echo "Cleaning obsolete devenv GC roots..."
+    echo "Removed 3 obsolete roots."
+    ;;
+  update)
+    echo "Updating inputs..."
+    echo "Lock file refreshed."
+    ;;
+  info)
+    echo "Name:      test-project"
+    echo "Version:   0.1.0"
+    echo "Nix files: devenv.nix devenv.yaml"
+    ;;
+  *)
+    echo "fake devenv: unhandled args: $*" >&2
+    exit 1
+    ;;
+esac

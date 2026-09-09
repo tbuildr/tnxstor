@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake nix for tnxstor integration tests.
+if [ -n "$TNXS_TEST_LOG" ]; then echo "nix $*" >> "$TNXS_TEST_LOG"; fi
+case "$1" in
+  --version) echo "nix (Nix) 2.19.2" ;;
+  store) echo "Store URL: daemon" ;;
+  *) echo "fake nix: unhandled args: $*" >&2; exit 1 ;;
+esac

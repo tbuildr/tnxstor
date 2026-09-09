@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fake home-manager for tnxstor integration tests.
+if [ -n "$TNXS_TEST_LOG" ]; then echo "home-manager $*" >> "$TNXS_TEST_LOG"; fi
+case "$1" in
+  generations)
+    cat <<'EOF'
+No 128  2026-09-09 09:41:12   (current)   /nix/store/aaaa-home-manager-generation
+No 127  2026-09-08 22:17:03   /nix/store/bbbb-home-manager-generation
+No 126  2026-09-07 18:32:44   /nix/store/cccc-home-manager-generation
+No 100  2025-06-01 12:01:00   /nix/store/dddd-home-manager-generation
+EOF
+    ;;
+  expire-generations)
+    echo "Removed generation 100"
+    ;;
+  *)
+    echo "fake home-manager: unhandled args: $*" >&2
+    exit 1
+    ;;
+esac

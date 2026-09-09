@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake du for tnxstor integration tests.
+if [ -n "$TNXS_TEST_LOG" ]; then echo "du $*" >> "$TNXS_TEST_LOG"; fi
+case "$1" in
+  -sb) echo "17179869184	$2" ;;
+  -sh) echo "16.0G	$2" ;;
+  *) echo "fake du: unhandled args: $*" >&2; exit 1 ;;
+esac
