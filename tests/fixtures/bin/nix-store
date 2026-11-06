@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Fake nix-store for tnxstor integration tests. Never touches a real store.
+if [ -n "$TNXS_TEST_LOG" ]; then echo "nix-store $*" >> "$TNXS_TEST_LOG"; fi
+arg1="$1"; arg2="$2"
+case "$arg1" in
+  --gc)
+    case "$arg2" in
+      --print-dead)
+        cat <<'EOF'
+/nix/store/00000000000000000000000000000000-devenv-env
+/nix/store/11111111111111111111111111111111-hello-2.12.1
+/nix/store/22222222222222222222222222222222-vim-9.1
+
+287 store paths deleted, 6.41 GiB freed
+EOF
+        ;;
+      --print-roots)
+        cat <<'EOF'
+/home/tester/.local/state/nix/profiles/home-manager -> /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-home-manager-generation
+/home/tester/dev/project/.devenv -> /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-devenv-env
+/nix/var/nix/profiles/default -> /nix/store/cccccccccccccccccccccccccccccccc-profile
+/nix/var/nix/profiles/per-user/root/profile -> /nix/store/dddddddddddddddddddddddddddddddd-profile
+EOF
+        ;;
+      --print-live)
+        printf '/nix/store/ffffffffffffffffffffffffffffffff-nix-2.19.2\n'
+        printf '/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-bash-5.2\n'
+        ;;
+      "")
+        echo "287 store paths deleted, 6.41 GiB freed"
+        ;;
+      *)
+        echo "fake nix-store: unhandled args: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  --optimise)
+    echo "18971 links created, 4.55 GiB saved"
+    ;;
+  *)
+    echo "fake nix-store: unhandled args: $*" >&2
+    exit 1
+    ;;
+esac
