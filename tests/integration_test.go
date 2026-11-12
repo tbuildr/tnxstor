@@ -7,11 +7,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-const fixturesBin = "/workspace/tests/fixtures/bin"
+// fixturesBin is resolved from this source file so the tests run from any
+// checkout location, not just the sandbox path they were written in.
+var fixturesBin = func() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("cannot locate integration_test.go")
+	}
+	return filepath.Join(filepath.Dir(file), "fixtures", "bin")
+}()
 
 func buildBinary(t *testing.T) string {
 	t.Helper()

@@ -3,16 +3,24 @@ package operations
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"tnxstor/internal/runner"
 )
 
-const fakeHMGenerations = `No 128  2026-09-09 09:41:12   (current)   /nix/store/aaaa-home-manager-generation
-No 127  2026-09-08 22:17:03   /nix/store/bbbb-home-manager-generation
-No 100  2026-08-01 12:01:00   /nix/store/dddd-home-manager-generation
-`
+// fakeHMGenerations returns a listing relative to the current time so the
+// age-based expectations stay valid: 127 is recent, 100 is 60 days old.
+func fakeHMGenerations() string {
+	now := time.Now().UTC()
+	line := func(no int, at time.Time, marker, hash string) string {
+		return fmt.Sprintf("No %d  %s  %s/nix/store/%s-home-manager-generation", no, at.Format("2006-01-02 15:04:05"), marker, hash)
+	}
+	return line(128, now.Add(-time.Hour), "(current)   ", "aaaa") + "\n" +
+		line(127, now.Add(-48*time.Hour), "", "bbbb") + "\n" +
+		line(100, now.Add(-60*24*time.Hour), "", "dddd") + "\n"
+}
 
 func newEx(f *runner.FakeRunner, dryRun bool) *Executor {
 	return &Executor{R: f, Opts: Options{DryRun: dryRun}}
@@ -178,18 +186,22 @@ func TestDevenvUpdateDryRun(t *testing.T) {
 			t.Fatal("devenv update must not run in dry-run")
 		}
 	}
-	// devenv info is read-only and always allowed.
-	if _, err := ex.DevenvInfo(context.Background()); err != nil {
-		t.Errorf("devenv info should run even in dry-run: %v", err)
+	// Read-only diagnostics are gated by dry-run too (README, dry-run section).
+	info, err := ex.DevenvInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !f.HasRun("devenv info") {
-		t.Error("devenv info should have been called")
+	if !info.DryRun || len(info.Plan.Commands) != 1 || info.Plan.Commands[0] != "devenv info" {
+		t.Errorf("devenv info plan = %+v", info)
+	}
+	if f.HasRun("devenv info") {
+		t.Error("devenv info must not run in dry-run")
 	}
 }
 
 func TestHMExpireDryRunListsButDoesNotExpire(t *testing.T) {
 	f := runner.NewFake()
-	f.ScriptCmd("home-manager generations", fakeHMGenerations)
+	f.ScriptCmd("home-manager generations", fakeHMGenerations())
 	ex := newEx(f, true)
 	out, err := ex.HMExpire(context.Background(), "30d")
 	if err != nil {
@@ -266,7 +278,7 @@ func TestCleanDryRunPlanOnly(t *testing.T) {
 func TestCleanExecutionOrder(t *testing.T) {
 	f := runner.NewFake()
 	f.ScriptCmd("devenv gc", "cleaned")
-	f.ScriptCmd("home-manager generations", fakeHMGenerations)
+	f.ScriptCmd("home-manager generations", fakeHMGenerations())
 	f.ScriptCmd("home-manager expire-generations -30 days", "expired")
 	f.ScriptCmd("nix-store --gc", "1 store path deleted, 1.00 MiB freed")
 	ex := newEx(f, false)
@@ -310,7 +322,7 @@ func TestOptimiseDryRun(t *testing.T) {
 
 func TestConfirmDeclined(t *testing.T) {
 	f := runner.NewFake()
-	f.ScriptCmd("home-manager generations", fakeHMGenerations)
+	f.ScriptCmd("home-manager generations", fakeHMGenerations())
 	ex := newEx(f, false)
 	ex.Confirm = func(string, string) bool { return false }
 	_, err := ex.HMExpire(context.Background(), "30d")
