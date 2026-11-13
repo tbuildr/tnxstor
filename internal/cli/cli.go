@@ -3,12 +3,15 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
+	"tnxstor/internal/devenv"
 	"tnxstor/internal/homemanager"
 	"tnxstor/internal/operations"
 	"tnxstor/internal/runner"
@@ -47,11 +50,22 @@ Commands:
   roots           Show garbage collection roots
   optimise        Optimise/deduplicate the Nix store
 
-  devenv-gc       Clean devenv GC roots
-  devenv-update   Update devenv inputs and lock files
-  devenv-info     Show devenv environment info (read-only)
+  devenv-envs     List devenv environments under ~/Projects
+  devenv-gc       Clean devenv GC roots for a selected environment
+  devenv-update   Update a selected devenv environment's inputs and lock files
+  devenv-info     Show a selected devenv environment's info (read-only)
   hm-generations  Show Home Manager generations
   hm-expire       Expire old Home Manager generations
+
+devenv environment selection (devenv-gc, devenv-update, devenv-info, clean):
+  --dir, -C DIR   manage this devenv project directory
+  --env NAME      select an environment listed by 'tnxs devenv-envs'
+  Without either, the project containing the current directory is used,
+  or the sole environment under ~/Projects.
+
+devenv-envs options:
+  --projects-dir DIR  root to scan (default $TNXS_PROJECTS_DIR or ~/Projects)
+  --json              emit JSON
 
 Global options:
   --dry-run       Show actions without performing destructive operations
@@ -151,12 +165,14 @@ func Main(args []string, s Stdio) int {
 		err = cmdGCOld(ctx, ex, g, s)
 	case "optimise":
 		err = cmdOptimise(ctx, ex, g, s)
+	case "devenv-envs", "devenv-list":
+		err = cmdDevenvEnvs(ctx, sub, s)
 	case "devenv-gc", "devenv_gc":
-		err = cmdDevenvGC(ctx, ex, g, s)
+		err = cmdDevenvGC(ctx, ex, g, sub, s)
 	case "devenv-update":
-		err = cmdDevenvUpdate(ctx, ex, g, s)
+		err = cmdDevenvUpdate(ctx, ex, g, sub, s)
 	case "devenv-info":
-		err = cmdDevenvInfo(ctx, ex, s)
+		err = cmdDevenvInfo(ctx, ex, sub, s)
 	case "hm-generations", "hm-generations-list":
 		err = cmdHMGenerations(ctx, ex, s)
 	case "hm-expire":
@@ -397,19 +413,134 @@ func cmdOptimise(ctx context.Context, ex *operations.Executor, g GlobalFlags, s 
 	return nil
 }
 
-func cmdDevenvGC(ctx context.Context, ex *operations.Executor, g GlobalFlags, s Stdio) error {
+// devenvTargetFlags selects which devenv project an operation manages.
+type devenvTargetFlags struct {
+	Dir string
+	Env string
+}
+
+func newDevenvTargetFlags(fs *flag.FlagSet) *devenvTargetFlags {
+	f := &devenvTargetFlags{}
+	fs.StringVar(&f.Dir, "dir", "", "devenv project directory")
+	fs.StringVar(&f.Dir, "C", "", "devenv project directory (shorthand)")
+	fs.StringVar(&f.Env, "env", "", "devenv environment name (see `tnxs devenv-envs`)")
+	return f
+}
+
+func (f *devenvTargetFlags) resolve() (devenv.Environment, error) {
+	return devenv.Select(devenv.DefaultProjectsDir(), f.Dir, f.Env)
+}
+
+func parseDevenvArgs(name string, args []string, s Stdio) (*devenvTargetFlags, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(s.Err)
+	target := newDevenvTargetFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return nil, &ExitError{Code: ExitUsage}
+	}
+	if fs.NArg() > 0 {
+		return nil, failf(s, ExitUsage, "unexpected argument %q", fs.Arg(0))
+	}
+	return target, nil
+}
+
+// cmdDevenvEnvs lists devenv projects so their paths can be passed to
+// --dir, or their names to --env.
+func cmdDevenvEnvs(_ context.Context, args []string, s Stdio) error {
+	fs := flag.NewFlagSet("devenv-envs", flag.ContinueOnError)
+	fs.SetOutput(s.Err)
+	root := fs.String("projects-dir", devenv.DefaultProjectsDir(), "root directory to scan")
+	asJSON := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return &ExitError{Code: ExitUsage}
+	}
+	if fs.NArg() > 0 {
+		return failf(s, ExitUsage, "unexpected argument %q", fs.Arg(0))
+	}
+
+	var current *devenv.Environment
+	if cwd, err := os.Getwd(); err == nil {
+		if env, ok := devenv.FindProject(cwd); ok {
+			current = &env
+		}
+	}
+
+	envs, discoverErr := devenv.Discover(*root, devenv.DefaultMaxDepth)
+	if discoverErr != nil && current == nil {
+		return discoverErr
+	}
+	if current != nil {
+		found := false
+		for i := range envs {
+			if envs[i].Dir == current.Dir {
+				envs[i].Current = true
+				found = true
+			}
+		}
+		if !found {
+			envs = append(envs, *current)
+		}
+	}
+	sort.Slice(envs, func(i, j int) bool {
+		if envs[i].Name == envs[j].Name {
+			return envs[i].Dir < envs[j].Dir
+		}
+		return envs[i].Name < envs[j].Name
+	})
+
+	if *asJSON {
+		if envs == nil {
+			envs = []devenv.Environment{}
+		}
+		enc := json.NewEncoder(s.Out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(envs)
+	}
+
+	fmt.Fprintln(s.Out, "devenv environments")
+	fmt.Fprintln(s.Out)
+	fmt.Fprintf(s.Out, "Root: %s\n\n", *root)
+	if discoverErr != nil {
+		fmt.Fprintf(s.Out, "(root unavailable: %v)\n\n", discoverErr)
+	}
+	if len(envs) == 0 {
+		fmt.Fprintln(s.Out, "No devenv environments found.")
+		fmt.Fprintln(s.Out, "Create one with `devenv init` or set TNXS_PROJECTS_DIR.")
+		return nil
+	}
+	for _, e := range envs {
+		mark := "  "
+		if e.Current {
+			mark = "* "
+		}
+		fmt.Fprintf(s.Out, "%s%-24s %s\n", mark, e.Label(), e.Dir)
+	}
+	return nil
+}
+
+func cmdDevenvGC(ctx context.Context, ex *operations.Executor, g GlobalFlags, args []string, s Stdio) error {
+	target, err := parseDevenvArgs("devenv-gc", args, s)
+	if err != nil {
+		return err
+	}
+	env, err := target.resolve()
+	if err != nil {
+		return failf(s, ExitUsage, "%v", err)
+	}
 	if ex.Opts.DryRun {
-		out, err := ex.DevenvGC(ctx)
+		out, err := ex.DevenvGC(ctx, env.Dir)
 		if err != nil {
 			return err
 		}
+		fmt.Fprintf(s.Out, "devenv environment: %s\n\n", env.Dir)
 		printDryRun(s, out.Plan)
 		return nil
 	}
 	if !ex.Opts.Quiet {
+		fmt.Fprintf(s.Out, "devenv environment: %s\n", env.Dir)
 		fmt.Fprintln(s.Out, "Running devenv garbage collection...")
 	}
-	out, err := ex.DevenvGC(ctx)
+	out, err := ex.DevenvGC(ctx, env.Dir)
 	if err != nil {
 		return err
 	}
@@ -419,19 +550,29 @@ func cmdDevenvGC(ctx context.Context, ex *operations.Executor, g GlobalFlags, s 
 	return nil
 }
 
-func cmdDevenvUpdate(ctx context.Context, ex *operations.Executor, g GlobalFlags, s Stdio) error {
+func cmdDevenvUpdate(ctx context.Context, ex *operations.Executor, g GlobalFlags, args []string, s Stdio) error {
+	target, err := parseDevenvArgs("devenv-update", args, s)
+	if err != nil {
+		return err
+	}
+	env, err := target.resolve()
+	if err != nil {
+		return failf(s, ExitUsage, "%v", err)
+	}
 	if ex.Opts.DryRun {
-		out, err := ex.DevenvUpdate(ctx)
+		out, err := ex.DevenvUpdate(ctx, env.Dir)
 		if err != nil {
 			return err
 		}
+		fmt.Fprintf(s.Out, "devenv environment: %s\n\n", env.Dir)
 		printDryRun(s, out.Plan)
 		return nil
 	}
 	if !ex.Opts.Quiet {
+		fmt.Fprintf(s.Out, "devenv environment: %s\n", env.Dir)
 		fmt.Fprintln(s.Out, "Running devenv update...")
 	}
-	out, err := ex.DevenvUpdate(ctx)
+	out, err := ex.DevenvUpdate(ctx, env.Dir)
 	if err != nil {
 		return err
 	}
@@ -444,14 +585,26 @@ func cmdDevenvUpdate(ctx context.Context, ex *operations.Executor, g GlobalFlags
 	return nil
 }
 
-func cmdDevenvInfo(ctx context.Context, ex *operations.Executor, s Stdio) error {
-	out, err := ex.DevenvInfo(ctx)
+func cmdDevenvInfo(ctx context.Context, ex *operations.Executor, args []string, s Stdio) error {
+	target, err := parseDevenvArgs("devenv-info", args, s)
+	if err != nil {
+		return err
+	}
+	env, err := target.resolve()
+	if err != nil {
+		return failf(s, ExitUsage, "%v", err)
+	}
+	out, err := ex.DevenvInfo(ctx, env.Dir)
 	if err != nil {
 		return err
 	}
 	if out.DryRun {
+		fmt.Fprintf(s.Out, "devenv environment: %s\n\n", env.Dir)
 		printDryRun(s, out.Plan)
 		return nil
+	}
+	if !ex.Opts.Quiet {
+		fmt.Fprintf(s.Out, "devenv environment: %s\n\n", env.Dir)
 	}
 	fmt.Fprint(s.Out, strings.TrimRight(out.Raw, "\n")+"\n")
 	return nil
@@ -548,7 +701,9 @@ func cmdClean(ctx context.Context, ex *operations.Executor, g GlobalFlags, args 
 	fs := flag.NewFlagSet("clean", flag.ContinueOnError)
 	fs.SetOutput(s.Err)
 	hmOlder := fs.String("hm-older-than", "30d", "expire Home Manager generations older than this period")
-	devenv := fs.Bool("devenv", false, "include devenv GC")
+	devenvDir := fs.String("devenv-dir", "", "devenv project directory for the devenv step")
+	devenvEnv := fs.String("devenv-env", "", "devenv environment name for the devenv step (see `tnxs devenv-envs`)")
+	devenvStep := fs.Bool("devenv", false, "include devenv GC")
 	homeManager := fs.Bool("home-manager", false, "include Home Manager generation expiry")
 	gc := fs.Bool("gc", false, "include Nix garbage collection")
 	optimise := fs.Bool("optimise", false, "include Nix store optimisation")
@@ -561,15 +716,23 @@ func cmdClean(ctx context.Context, ex *operations.Executor, g GlobalFlags, args 
 	}
 
 	plan := operations.CleanPlan{HMOlderThan: *hmOlder}
-	if *devenv || *homeManager || *gc || *optimise || *aggressive {
+	if *devenvStep || *homeManager || *gc || *optimise || *aggressive {
 		// Explicit selection: only the requested steps run.
-		plan.DevenvGC = *devenv
+		plan.DevenvGC = *devenvStep
 		plan.HMExpire = *homeManager
 		plan.GC = *gc
 		plan.Optimise = *optimise
 		plan.Aggressive = *aggressive
 	} else {
 		plan = operations.DefaultCleanPlan()
+	}
+
+	if plan.DevenvGC {
+		env, err := devenv.Select(devenv.DefaultProjectsDir(), *devenvDir, *devenvEnv)
+		if err != nil {
+			return failf(s, ExitUsage, "cannot select devenv environment: %v", err)
+		}
+		plan.DevenvDir = env.Dir
 	}
 
 	steps := plan.Steps()
@@ -582,7 +745,11 @@ func cmdClean(ctx context.Context, ex *operations.Executor, g GlobalFlags, args 
 		// prompt again during execution.
 		var cmds []string
 		for _, st := range steps {
-			cmds = append(cmds, st.Command)
+			line := st.Command
+			if st.Dir != "" {
+				line += "\n    (in " + st.Dir + ")"
+			}
+			cmds = append(cmds, line)
 		}
 		title := "Cleanup plan"
 		for i, st := range steps {
@@ -610,6 +777,9 @@ func cmdClean(ctx context.Context, ex *operations.Executor, g GlobalFlags, args 
 		fmt.Fprintln(s.Out, "Cleanup plan")
 		for i, st := range steps {
 			fmt.Fprintf(s.Out, "%d. %s\n", i+1, st.Title)
+			if st.Dir != "" {
+				fmt.Fprintf(s.Out, "   Directory: %s\n", st.Dir)
+			}
 		}
 		fmt.Fprintln(s.Out)
 		fmt.Fprintln(s.Out, "No destructive operations will be executed.")
@@ -617,6 +787,9 @@ func cmdClean(ctx context.Context, ex *operations.Executor, g GlobalFlags, args 
 		fmt.Fprintln(s.Out, "Commands:")
 		for _, st := range steps {
 			fmt.Fprintf(s.Out, "\n  %s\n", st.Command)
+			if st.Dir != "" {
+				fmt.Fprintf(s.Out, "    (in %s)\n", st.Dir)
+			}
 		}
 		return nil
 	}
@@ -628,6 +801,9 @@ func printCleanSteps(s Stdio, out operations.CleanOutcome, ex *operations.Execut
 	for _, sr := range out.Steps {
 		fmt.Fprintf(s.Out, "\n[%s]\n", sr.Step.Title)
 		fmt.Fprintf(s.Out, "Running: %s\n", sr.Step.Command)
+		if sr.Step.Dir != "" {
+			fmt.Fprintf(s.Out, "Directory: %s\n", sr.Step.Dir)
+		}
 		if sr.Err != nil {
 			fmt.Fprintf(s.Out, "FAILED: %v\n", sr.Err)
 			continue

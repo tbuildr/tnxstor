@@ -227,6 +227,135 @@ func TestGCOldNonInteractiveRequiresYes(t *testing.T) {
 	}
 }
 
+func writeDevenvProject(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "devenv.nix"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDevenvEnvsListsProjects(t *testing.T) {
+	bin := buildBinary(t)
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	beta := filepath.Join(root, "team", "beta")
+	writeDevenvProject(t, alpha)
+	writeDevenvProject(t, beta)
+	t.Setenv("TNXS_PROJECTS_DIR", root)
+
+	stdout, stderr, code := runTNXS(t, bin, "devenv-envs")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"devenv environments", "alpha", "beta", root} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("devenv-envs output missing %q:\n%s", want, stdout)
+		}
+	}
+
+	stdout, stderr, code = runTNXS(t, bin, "devenv-envs", "--json")
+	if code != 0 {
+		t.Fatalf("json exit = %d, stderr: %s", code, stderr)
+	}
+	for _, want := range []string{`"name": "alpha"`, `"name": "team/beta"`, alpha} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("devenv-envs --json output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestDevenvInfoSelectsExplicitDir(t *testing.T) {
+	bin := buildBinary(t)
+	proj := filepath.Join(t.TempDir(), "chosen")
+	writeDevenvProject(t, proj)
+	cwdLog := filepath.Join(t.TempDir(), "cwd.log")
+	t.Setenv("TNXS_TEST_CWD_LOG", cwdLog)
+
+	stdout, stderr, code := runTNXS(t, bin, "devenv-info", "--dir", proj)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "devenv environment: "+proj) {
+		t.Errorf("output must name the managed directory:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "test-project") {
+		t.Errorf("devenv info output missing fixture text:\n%s", stdout)
+	}
+	data, err := os.ReadFile(cwdLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != proj {
+		t.Errorf("devenv ran in %q, want %q", got, proj)
+	}
+}
+
+func TestDevenvInfoSelectsEnvironmentByName(t *testing.T) {
+	bin := buildBinary(t)
+	root := t.TempDir()
+	proj := filepath.Join(root, "named")
+	writeDevenvProject(t, proj)
+	t.Setenv("TNXS_PROJECTS_DIR", root)
+
+	stdout, stderr, code := runTNXS(t, bin, "devenv-info", "--env", "named")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "devenv environment: "+proj) {
+		t.Errorf("output must name the selected directory:\n%s", stdout)
+	}
+}
+
+func TestDevenvGCUsesSelectedDir(t *testing.T) {
+	bin := buildBinary(t)
+	proj := filepath.Join(t.TempDir(), "gc-target")
+	writeDevenvProject(t, proj)
+	cwdLog := filepath.Join(t.TempDir(), "cwd.log")
+	t.Setenv("TNXS_TEST_CWD_LOG", cwdLog)
+
+	_, stderr, code := runTNXS(t, bin, "devenv-gc", "--dir", proj)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	data, err := os.ReadFile(cwdLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != proj {
+		t.Errorf("devenv gc ran in %q, want %q", got, proj)
+	}
+}
+
+func TestDevenvInvalidTargetIsUsageError(t *testing.T) {
+	bin := buildBinary(t)
+	notProject := t.TempDir()
+	_, stderr, code := runTNXS(t, bin, "devenv-info", "--dir", notProject)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "does not contain devenv.nix") {
+		t.Errorf("error should explain the missing marker: %s", stderr)
+	}
+}
+
+func TestCleanDryRunNamesDevenvDir(t *testing.T) {
+	bin := buildBinary(t)
+	proj := filepath.Join(t.TempDir(), "clean-target")
+	writeDevenvProject(t, proj)
+	stdout, stderr, code := runTNXS(t, bin, "clean", "--dry-run", "--devenv-dir", proj)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"Directory: " + proj, "devenv gc", "(in " + proj + ")"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("clean dry-run missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 func TestUnknownCommandExitCode(t *testing.T) {
 	bin := buildBinary(t)
 	_, _, code := runTNXS(t, bin, "nonsense")

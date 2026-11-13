@@ -88,6 +88,16 @@ func dryRun(title string, cmds ...string) Plan {
 	return Plan{Title: title, Commands: cmds}
 }
 
+// devenvPlan records the project directory being managed, so dry-run output
+// and results always make the target explicit.
+func devenvPlan(title, command, dir string) Plan {
+	p := dryRun(title, command)
+	if dir != "" {
+		p.Notes = append(p.Notes, "Directory: "+dir)
+	}
+	return p
+}
+
 // ---- Nix GC ------------------------------------------------------------
 
 // GCOutcome is the result of a garbage collection.
@@ -270,64 +280,68 @@ func (e *Executor) Optimise(ctx context.Context) (OptimiseOutcome, error) {
 type DevenvGCOutcome struct {
 	DryRun bool
 	Plan   Plan
+	Dir    string
 	Raw    string
 }
 
-// DevenvGC runs `devenv gc` (operation id: devenv-gc).
-func (e *Executor) DevenvGC(ctx context.Context) (DevenvGCOutcome, error) {
+// DevenvGC runs `devenv gc` in dir (operation id: devenv-gc).
+func (e *Executor) DevenvGC(ctx context.Context, dir string) (DevenvGCOutcome, error) {
 	if err := require(e.R, "devenv"); err != nil {
 		return DevenvGCOutcome{}, err
 	}
 	if e.Opts.DryRun {
-		return DevenvGCOutcome{DryRun: true, Plan: dryRun("devenv garbage collection", "devenv gc")}, nil
+		return DevenvGCOutcome{DryRun: true, Dir: dir, Plan: devenvPlan("devenv garbage collection", "devenv gc", dir)}, nil
 	}
-	e.Verbosef("operation=devenv-gc")
-	raw, err := devenv.GC(ctx, e.R)
-	return DevenvGCOutcome{Raw: raw}, err
+	e.Verbosef("operation=devenv-gc dir=%s", dir)
+	raw, err := devenv.GC(ctx, e.R, dir)
+	return DevenvGCOutcome{Dir: dir, Raw: raw}, err
 }
 
 // DevenvUpdateOutcome is the result of `devenv update`.
 type DevenvUpdateOutcome struct {
 	DryRun bool
 	Plan   Plan
+	Dir    string
 	Raw    string
 }
 
-// DevenvUpdate runs `devenv update` (operation id: devenv-update). It
+// DevenvUpdate runs `devenv update` in dir (operation id: devenv-update). It
 // refreshes the devenv project's inputs and lock files, so it honours
 // --dry-run like the destructive operations.
-func (e *Executor) DevenvUpdate(ctx context.Context) (DevenvUpdateOutcome, error) {
+func (e *Executor) DevenvUpdate(ctx context.Context, dir string) (DevenvUpdateOutcome, error) {
 	if err := require(e.R, "devenv"); err != nil {
 		return DevenvUpdateOutcome{}, err
 	}
 	if e.Opts.DryRun {
-		return DevenvUpdateOutcome{DryRun: true, Plan: dryRun("devenv environment update", "devenv update")}, nil
+		return DevenvUpdateOutcome{DryRun: true, Dir: dir, Plan: devenvPlan("devenv environment update", "devenv update", dir)}, nil
 	}
-	e.Verbosef("operation=devenv-update")
-	raw, err := devenv.Update(ctx, e.R)
-	return DevenvUpdateOutcome{Raw: raw}, err
+	e.Verbosef("operation=devenv-update dir=%s", dir)
+	raw, err := devenv.Update(ctx, e.R, dir)
+	return DevenvUpdateOutcome{Dir: dir, Raw: raw}, err
 }
 
 // DevenvInfoOutcome is the result of `devenv info`.
 type DevenvInfoOutcome struct {
 	DryRun bool
 	Plan   Plan
+	Dir    string
 	Raw    string
 }
 
-// DevenvInfo runs `devenv info` (operation id: devenv-info). Read-only, but
-// it honours --dry-run like every other operation.
-func (e *Executor) DevenvInfo(ctx context.Context) (DevenvInfoOutcome, error) {
+// DevenvInfo runs `devenv info` in dir (operation id: devenv-info).
+// Read-only, but it honours --dry-run like every other operation.
+func (e *Executor) DevenvInfo(ctx context.Context, dir string) (DevenvInfoOutcome, error) {
 	if err := require(e.R, "devenv"); err != nil {
 		return DevenvInfoOutcome{}, err
 	}
 	if e.Opts.DryRun {
-		p := dryRun("devenv environment info", "devenv info")
+		p := devenvPlan("devenv environment info", "devenv info", dir)
 		p.Notes = append(p.Notes, "This is a read-only diagnostic.")
-		return DevenvInfoOutcome{DryRun: true, Plan: p}, nil
+		return DevenvInfoOutcome{DryRun: true, Dir: dir, Plan: p}, nil
 	}
-	raw, err := devenv.Info(ctx, e.R)
-	return DevenvInfoOutcome{Raw: raw}, err
+	e.Verbosef("operation=devenv-info dir=%s", dir)
+	raw, err := devenv.Info(ctx, e.R, dir)
+	return DevenvInfoOutcome{Dir: dir, Raw: raw}, err
 }
 
 // ---- Home Manager ---------------------------------------------------------
@@ -410,6 +424,7 @@ func (e *Executor) HMExpire(ctx context.Context, period string) (HMExpireOutcome
 // conservative: aggressive GC and optimisation are never enabled implicitly.
 type CleanPlan struct {
 	DevenvGC    bool
+	DevenvDir   string
 	HMExpire    bool
 	HMOlderThan string
 	GC          bool
@@ -428,6 +443,7 @@ type CleanStep struct {
 	ID      string // operation id
 	Title   string
 	Command string
+	Dir     string // project directory for devenv steps, empty otherwise
 }
 
 // Steps returns the cleanup steps in the mandated order:
@@ -435,7 +451,12 @@ type CleanStep struct {
 func (p CleanPlan) Steps() []CleanStep {
 	var steps []CleanStep
 	if p.DevenvGC {
-		steps = append(steps, CleanStep{ID: "devenv-gc", Title: "devenv garbage collection", Command: "devenv gc"})
+		steps = append(steps, CleanStep{
+			ID:      "devenv-gc",
+			Title:   "devenv garbage collection",
+			Command: "devenv gc",
+			Dir:     p.DevenvDir,
+		})
 	}
 	if p.HMExpire {
 		period := p.HMOlderThan
@@ -523,6 +544,9 @@ func (e *Executor) Clean(ctx context.Context, plan CleanPlan) (CleanOutcome, err
 			cmds = append(cmds, s.Command)
 		}
 		out.Plan = Plan{Title: "Cleanup plan", Commands: cmds}
+		if plan.DevenvGC && plan.DevenvDir != "" {
+			out.Plan.Notes = append(out.Plan.Notes, "devenv directory: "+plan.DevenvDir)
+		}
 		return out, nil
 	}
 	if err := require(e.R, plan.RequiredTools()...); err != nil {
@@ -534,7 +558,7 @@ func (e *Executor) Clean(ctx context.Context, plan CleanPlan) (CleanOutcome, err
 		switch s.ID {
 		case "devenv-gc":
 			var o DevenvGCOutcome
-			o, err = e.DevenvGC(ctx)
+			o, err = e.DevenvGC(ctx, plan.DevenvDir)
 			sr.Raw = o.Raw
 		case "hm-expire":
 			period := plan.HMOlderThan

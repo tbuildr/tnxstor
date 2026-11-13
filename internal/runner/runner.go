@@ -55,8 +55,12 @@ func (e *exitError) Error() string { return fmt.Sprintf("exit status %d", e.code
 
 // Runner executes external commands. Implementations must never invoke a
 // shell ("sh -c"); arguments are always passed separately.
+//
+// RunDir runs a command in dir without changing the process working
+// directory. An empty dir inherits the caller's working directory.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) Result
+	RunDir(ctx context.Context, dir, name string, args ...string) Result
 	LookPath(name string) (string, bool)
 }
 
@@ -71,17 +75,29 @@ func NewExec() *ExecRunner { return &ExecRunner{} }
 
 // Run executes the command using exec.CommandContext with separate arguments.
 func (e *ExecRunner) Run(ctx context.Context, name string, args ...string) Result {
+	return e.RunDir(ctx, "", name, args...)
+}
+
+// RunDir executes the command in dir using exec.CommandContext with separate
+// arguments. The process working directory is never changed.
+func (e *ExecRunner) RunDir(ctx context.Context, dir, name string, args ...string) Result {
 	cmdStr := name
 	if len(args) > 0 {
 		cmdStr = name + " " + strings.Join(args, " ")
 	}
 	if e.Verbose != nil {
+		if dir != "" {
+			e.Verbose("directory=%s", dir)
+		}
 		e.Verbose("command=%s", cmdStr)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
 	cmd := osexec.CommandContext(ctx, name, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -134,6 +150,7 @@ type FakeRunner struct {
 type Call struct {
 	Name string
 	Args []string
+	Dir  string
 }
 
 // CommandString renders the full command line for a Call.
@@ -173,8 +190,14 @@ func (f *FakeRunner) ScriptErr(name, stderr string, code int) {
 }
 
 // Run returns the scripted result, if any.
-func (f *FakeRunner) Run(_ context.Context, name string, args ...string) Result {
-	call := Call{Name: name, Args: args}
+func (f *FakeRunner) Run(ctx context.Context, name string, args ...string) Result {
+	return f.RunDir(ctx, "", name, args...)
+}
+
+// RunDir returns the scripted result, recording dir on the call so tests can
+// assert which project directory an operation targeted.
+func (f *FakeRunner) RunDir(_ context.Context, dir, name string, args ...string) Result {
+	call := Call{Name: name, Args: args, Dir: dir}
 	f.Calls = append(f.Calls, call)
 	if r, ok := f.ScriptCmds[call.CommandString()]; ok {
 		return r

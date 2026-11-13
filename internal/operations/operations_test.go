@@ -26,6 +26,8 @@ func newEx(f *runner.FakeRunner, dryRun bool) *Executor {
 	return &Executor{R: f, Opts: Options{DryRun: dryRun}}
 }
 
+const testDir = "/home/tester/Projects/demo"
+
 func TestDiagnosticOpsHonourDryRun(t *testing.T) {
 	f := runner.NewFake()
 	ex := newEx(f, true)
@@ -34,7 +36,7 @@ func TestDiagnosticOpsHonourDryRun(t *testing.T) {
 	_, e2 := ex.Roots(context.Background())
 	_, e3 := ex.Live(context.Background())
 	_, e4 := ex.HMGenerations(context.Background())
-	_, e5 := ex.DevenvInfo(context.Background())
+	_, e5 := ex.DevenvInfo(context.Background(), testDir)
 	for i, e := range []error{e1, e2, e3, e4, e5} {
 		if e != nil {
 			t.Errorf("op %d: %v", i, e)
@@ -52,7 +54,7 @@ func TestDryRunPlansMatchCommands(t *testing.T) {
 	r, _ := ex.Roots(context.Background())
 	l, _ := ex.Live(context.Background())
 	h, _ := ex.HMGenerations(context.Background())
-	i, _ := ex.DevenvInfo(context.Background())
+	i, _ := ex.DevenvInfo(context.Background(), testDir)
 	for _, tc := range []struct {
 		p    Plan
 		want string
@@ -130,12 +132,15 @@ func TestGCOldDryRunExplainsGenerations(t *testing.T) {
 func TestDevenvGCDryRun(t *testing.T) {
 	f := runner.NewFake()
 	ex := newEx(f, true)
-	out, err := ex.DevenvGC(context.Background())
+	out, err := ex.DevenvGC(context.Background(), testDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out.Plan.Commands[0] != "devenv gc" {
 		t.Errorf("plan = %q", out.Plan.Commands)
+	}
+	if !contains(out.Plan.String(), testDir) {
+		t.Errorf("dry-run plan must name the target directory: %q", out.Plan.String())
 	}
 	for _, c := range f.Calls {
 		if c.Name == "devenv" {
@@ -150,7 +155,7 @@ func TestDevenvUpdateAndInfo(t *testing.T) {
 	f.ScriptCmd("devenv info", "Name: test")
 	ex := newEx(f, false)
 
-	info, err := ex.DevenvInfo(context.Background())
+	info, err := ex.DevenvInfo(context.Background(), testDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +163,7 @@ func TestDevenvUpdateAndInfo(t *testing.T) {
 		t.Errorf("info raw = %q", info.Raw)
 	}
 
-	upd, err := ex.DevenvUpdate(context.Background())
+	upd, err := ex.DevenvUpdate(context.Background(), testDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,13 +173,18 @@ func TestDevenvUpdateAndInfo(t *testing.T) {
 	if !f.HasRun("devenv update") || !f.HasRun("devenv info") {
 		t.Error("devenv update/info should have run")
 	}
+	for _, c := range f.Calls {
+		if c.Name == "devenv" && c.Dir != testDir {
+			t.Errorf("%s ran in %q, want %q", c.CommandString(), c.Dir, testDir)
+		}
+	}
 }
 
 func TestDevenvUpdateDryRun(t *testing.T) {
 	f := runner.NewFake()
 	f.ScriptCmd("devenv info", "Name: test")
 	ex := newEx(f, true)
-	out, err := ex.DevenvUpdate(context.Background())
+	out, err := ex.DevenvUpdate(context.Background(), testDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +197,7 @@ func TestDevenvUpdateDryRun(t *testing.T) {
 		}
 	}
 	// Read-only diagnostics are gated by dry-run too (README, dry-run section).
-	info, err := ex.DevenvInfo(context.Background())
+	info, err := ex.DevenvInfo(context.Background(), testDir)
 	if err != nil {
 		t.Fatal(err)
 	}

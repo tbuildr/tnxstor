@@ -72,9 +72,10 @@ tnxs dead                  Show unreachable store paths
 tnxs live                  Show live store paths
 tnxs roots                 Show garbage collection roots
 tnxs optimise              Optimise/deduplicate the Nix store
-tnxs devenv-gc             Clean devenv GC roots
-tnxs devenv-update         Update devenv inputs and lock files
-tnxs devenv-info           Show devenv environment info (read-only)
+tnxs devenv-envs           List devenv environments under ~/Projects
+tnxs devenv-gc             Clean devenv GC roots for an environment
+tnxs devenv-update         Update an environment's inputs and lock files
+tnxs devenv-info           Show an environment's info (read-only)
 tnxs hm-generations        Show Home Manager generations
 tnxs hm-expire             Expire old Home Manager generations
 ```
@@ -91,6 +92,31 @@ Global options (available on every command):
 -h, --help   Show help
 ```
 
+### Selecting a devenv environment
+
+tnxstor discovers devenv projects under `~/Projects` (override with
+`TNXS_PROJECTS_DIR`). A directory is a devenv environment when it contains
+`devenv.nix`, `devenv.yaml` or `devenv.yml`.
+
+```text
+tnxs devenv-envs                    list projects and their directories
+tnxs devenv-envs --json             machine-readable listing
+tnxs devenv-envs --projects-dir DIR scan a different root
+```
+
+`devenv-gc`, `devenv-update` and `devenv-info` accept:
+
+```text
+--dir, -C DIR   manage this project directory
+--env NAME      select a project by its listing name
+```
+
+Without either flag, tnxstor uses the project containing the current
+directory, or the sole discovered environment. If several exist and the
+current directory is not inside one, the command fails with guidance instead
+of guessing. The managed directory is always printed, and dry-run plans
+include it.
+
 ### Examples
 
 ```bash
@@ -105,6 +131,12 @@ tnxs hm-expire --older-than 30d
 tnxs clean --dry-run             # complete cleanup plan, nothing executed
 tnxs clean --yes                 # conservative cleanup, no prompts
 tnxs clean --home-manager --gc --optimise --yes
+
+tnxs devenv-envs                 # what can tnxs manage?
+tnxs devenv-info --env my-app    # inspect a discovered environment
+tnxs devenv-update -C ~/Projects/my-app
+tnxs devenv-gc --dir ~/Projects/my-app --dry-run
+tnxs clean --dry-run --devenv-dir ~/Projects/my-app
 ```
 
 ### `tnxs clean`
@@ -123,6 +155,8 @@ Options:
 --yes
 --hm-older-than 30d
 --devenv          include devenv GC
+--devenv-dir DIR  devenv project for the devenv step
+--devenv-env NAME devenv environment for the devenv step
 --home-manager    include Home Manager generation expiry
 --gc              include Nix GC
 --optimise        include store optimisation
@@ -149,8 +183,17 @@ only the selected steps run. Aggressive GC is never included by default.
 Running `tnxs` (or `tnxs tui`) opens an interactive interface with the same
 operations behind the scenes: status dashboard, dead-path preview, GC,
 aggressive GC, optimisation, roots/live listing, Home Manager generations
-and expiry, devenv GC — plus a **Clean up** workflow where you can select
-multiple operations and review the plan before running it.
+and expiry, devenv environment management — plus a **Clean up** workflow
+where you can select multiple operations and review the plan before running
+it.
+
+The devenv section starts with **Select environment**, which lists every
+devenv project found under `~/Projects` (and the project containing the
+current directory). The section header, confirmation screen, running screen
+and results all show the managed directory. Choosing a devenv operation
+before selecting an environment opens the picker first, then continues with
+the operation. The cleanup workflow also asks for an environment when its
+devenv step is selected.
 
 The `Status` item stands alone at the top of the menu, outside the Nix
 Store group. The header shows a context label that follows the screen and
@@ -206,7 +249,9 @@ still run are read-only *discovery* steps required to compute impact: for
 example `tnxs hm-expire --older-than 30d --dry-run` executes
 `home-manager generations` (read-only) so it can show you which
 generations would be affected, while refusing to execute
-`home-manager expire-generations "-30 days"`. tnxstor never fakes results:
+`home-manager expire-generations "-30 days"`. Similarly, devenv target
+selection scans `~/Projects` (read-only) so dry-run output can name the
+project directory; no devenv command runs. tnxstor never fakes results:
 it will not claim a number of freed bytes it has not measured.
 
 ---
@@ -222,6 +267,9 @@ it will not claim a number of freed bytes it has not measured.
   interpolated into a shell string.
 - Destructive operations require explicit confirmation in interactive mode
   (or `--yes`); non-interactive runs without `--yes` are refused.
+- devenv project discovery only stats marker files; it never modifies
+  projects or devenv's GC directory. Commands run in the selected project
+  directory without changing tnxstor's own working directory.
 - The current Home Manager generation can never be selected for expiry.
 - `gc-old` (aggressive GC) is always clearly separated from normal GC and
   warns that you may lose rollback points.
@@ -253,13 +301,29 @@ devenv maintains timestamped GC roots itself. tnxstor runs the official
 collection. It never deletes anything from devenv's GC directory directly,
 and `devenv-gc` is always a distinct operation from plain Nix GC.
 
-Two more devenv operations are provided for the **current project
-directory**:
+tnxstor can manage any devenv project, not just the one in the current
+working directory:
 
-- `tnxs devenv-update` runs `devenv update`, refreshing the project's
-  inputs and lock files. It honours `--dry-run`.
-- `tnxs devenv-info` runs `devenv info`, a read-only overview of the
-  environment.
+- `tnxs devenv-envs` discovers projects under `~/Projects` (override with
+  `TNXS_PROJECTS_DIR`), skipping hidden and generated directories
+  (`node_modules`, `.devenv`, `result`, …) and limiting scan depth.
+- `tnxs devenv-info --env NAME` (or `--dir, -C DIR`) selects a project.
+  Without a selector, tnxstor uses the project containing the current
+  directory, or the sole discovered environment; it never guesses between
+  multiple projects.
+- `tnxs devenv-gc` runs `devenv gc` in the selected project directory.
+- `tnxs devenv-update` runs `devenv update` in the selected directory,
+  refreshing its inputs and lock files. It honours `--dry-run`.
+- `tnxs devenv-info` runs `devenv info`, a read-only overview.
+
+The selected directory is always printed, included in dry-run plans, and
+shown in the TUI. In the TUI, **devenv → Select environment** changes the
+target for all three operations and the cleanup workflow. Commands are
+executed with the project directory as their working directory; tnxstor
+never changes its own process working directory or builds a shell command
+string.
+
+Discovery is read-only: it stats marker files and never modifies projects.
 
 ---
 
@@ -304,12 +368,13 @@ The test suite never touches a real Nix store:
 
 - Unit tests use fake runners (`internal/runner.FakeRunner`) and cover
   command construction, argument validation, dry-run behaviour, Home
-  Manager generation parsing, Nix GC output parsing, byte-size parsing and
-  operation ordering.
+  Manager generation parsing, Nix GC output parsing, byte-size parsing,
+  operation ordering, and devenv project discovery/selection.
 - Integration tests (`tests/`) build the real binary and run it against
   fake executables in `tests/fixtures/bin/` that emit representative
-  outputs and log their invocations, so destructive calls can be asserted
-  to have (or have not) happened.
+  outputs, log their invocations, and optionally log their working
+  directory, so destructive calls and devenv project targets can be
+  asserted to have (or have not) happened.
 
 Cross-compilation targets `linux/amd64` initially; `linux/arm64` works via
 `GOARCH=arm64 go build`. Unsupported platforms are reported gracefully.
