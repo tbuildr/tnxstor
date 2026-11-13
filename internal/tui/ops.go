@@ -3,11 +3,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"tnxstor/internal/devenv"
 	"tnxstor/internal/operations"
 	"tnxstor/internal/util"
 )
@@ -24,6 +27,13 @@ type statusLoadedMsg struct {
 	err error
 }
 
+type devenvEnvsLoadedMsg struct {
+	root    string
+	envs    []devenv.Environment
+	current *devenv.Environment
+	err     error
+}
+
 type opDoneMsg struct {
 	res runResult
 	op  operation
@@ -38,10 +48,72 @@ type opErrMsg struct {
 func beginOp(m model, op operation) (model, tea.Cmd) {
 	m.op = op
 	m.running = m.metaFor(op).title
+	if isDevenvOp(op) && m.devenvEnv != nil {
+		m.running += " · " + m.devenvEnv.Dir
+	}
 	m.screen = screenRunning
 	ctx, cancel := context.WithCancel(context.Background())
 	m.opCtx, m.opCancel = ctx, cancel
 	return m, tea.Batch(m.spin.Tick, m.runOp(op))
+}
+
+func isDevenvOp(op operation) bool {
+	switch op {
+	case opDevenvSelect, opDevenvGC, opDevenvUpdate, opDevenvInfo:
+		return true
+	}
+	return false
+}
+
+func (m model) devenvDir() string {
+	if m.devenvEnv != nil {
+		return m.devenvEnv.Dir
+	}
+	return ""
+}
+
+func (m model) devenvSummary() string {
+	if m.devenvEnv == nil {
+		return ""
+	}
+	return "Directory: " + m.devenvEnv.Dir
+}
+
+// loadDevenvEnvs discovers projects under the configured root and resolves
+// the project containing the current directory.
+func (m model) loadDevenvEnvs() tea.Cmd {
+	root := devenv.DefaultProjectsDir()
+	return func() tea.Msg {
+		envs, err := devenv.Discover(root, devenv.DefaultMaxDepth)
+		var current *devenv.Environment
+		if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+			if env, ok := devenv.FindProject(cwd); ok {
+				current = &env
+				found := false
+				for i := range envs {
+					if envs[i].Dir == env.Dir {
+						envs[i].Current = true
+						found = true
+					}
+				}
+				if !found {
+					envs = append(envs, env)
+				}
+			}
+		}
+		sort.Slice(envs, func(i, j int) bool {
+			if envs[i].Name == envs[j].Name {
+				return envs[i].Dir < envs[j].Dir
+			}
+			return envs[i].Name < envs[j].Name
+		})
+		// A current project outside the root is still usable, so a missing
+		// projects directory is not an error in that case.
+		if err != nil && current == nil {
+			return devenvEnvsLoadedMsg{root: root, err: err}
+		}
+		return devenvEnvsLoadedMsg{root: root, envs: envs, current: current}
+	}
 }
 
 // dryRunResult renders a dry-run outcome: the plan is shown, the command is
@@ -146,37 +218,52 @@ func (m model) runOp(op operation) tea.Cmd {
 			return opDoneMsg{runResult{title: "Store Optimisation Complete", summary: sum, raw: out.Raw, ok: true}, op}
 		}
 	case opDevenvGC:
+		dir := m.devenvDir()
 		return func() tea.Msg {
-			out, err := ex.DevenvGC(ctx)
+			out, err := ex.DevenvGC(ctx, dir)
 			if err != nil {
 				return opErrMsg{err, op}
 			}
 			if out.DryRun {
 				return opDoneMsg{dryRunResult("devenv garbage collection", out.Plan), op}
 			}
-			return opDoneMsg{runResult{title: "devenv GC Complete", summary: "Complete.", raw: out.Raw, ok: true}, op}
+			sum := "Complete."
+			if out.Dir != "" {
+				sum = "Directory: " + out.Dir + "\n" + sum
+			}
+			return opDoneMsg{runResult{title: "devenv GC Complete", summary: sum, raw: out.Raw, ok: true}, op}
 		}
 	case opDevenvUpdate:
+		dir := m.devenvDir()
 		return func() tea.Msg {
-			out, err := ex.DevenvUpdate(ctx)
+			out, err := ex.DevenvUpdate(ctx, dir)
 			if err != nil {
 				return opErrMsg{err, op}
 			}
 			if out.DryRun {
 				return opDoneMsg{dryRunResult("devenv environment update", out.Plan), op}
 			}
-			return opDoneMsg{runResult{title: "devenv Update Complete", summary: "Inputs and lock files refreshed.", raw: out.Raw, ok: true}, op}
+			sum := "Inputs and lock files refreshed."
+			if out.Dir != "" {
+				sum = "Directory: " + out.Dir + "\n" + sum
+			}
+			return opDoneMsg{runResult{title: "devenv Update Complete", summary: sum, raw: out.Raw, ok: true}, op}
 		}
 	case opDevenvInfo:
+		dir := m.devenvDir()
 		return func() tea.Msg {
-			out, err := ex.DevenvInfo(ctx)
+			out, err := ex.DevenvInfo(ctx, dir)
 			if err != nil {
 				return opErrMsg{err, op}
 			}
 			if out.DryRun {
 				return opDoneMsg{dryRunResult("devenv environment info", out.Plan), op}
 			}
-			return opDoneMsg{runResult{title: "devenv Environment Info", summary: "Current project information", raw: out.Raw, ok: true}, op}
+			sum := "Selected project information"
+			if out.Dir != "" {
+				sum = "Directory: " + out.Dir
+			}
+			return opDoneMsg{runResult{title: "devenv Environment Info", summary: sum, raw: out.Raw, ok: true}, op}
 		}
 	case opHMGenerations:
 		return func() tea.Msg {
@@ -221,6 +308,7 @@ func (m model) runOp(op operation) tea.Cmd {
 		return func() tea.Msg {
 			plan := operations.CleanPlan{
 				DevenvGC:    m.cleanChecks["devenv-gc"],
+				DevenvDir:   m.devenvDir(),
 				HMExpire:    m.cleanChecks["hm-expire"],
 				HMOlderThan: m.hmExpirePeriod,
 				GC:          m.cleanChecks["gc"],

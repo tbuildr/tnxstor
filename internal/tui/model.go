@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/lipgloss"
 
+	"tnxstor/internal/devenv"
 	"tnxstor/internal/operations"
 	"tnxstor/internal/runner"
 	"tnxstor/internal/tui/components"
@@ -23,6 +24,7 @@ const (
 	screenResult
 	screenGenerations
 	screenCleanup
+	screenDevenvEnvs
 	screenHelp
 )
 
@@ -37,6 +39,7 @@ const (
 	opGC
 	opGCOld
 	opOptimise
+	opDevenvSelect
 	opDevenvGC
 	opDevenvUpdate
 	opDevenvInfo
@@ -72,9 +75,10 @@ var menuHM = []opMeta{
 }
 
 var menuDevenv = []opMeta{
+	{opDevenvSelect, "Select environment", "Choose the devenv project to manage", "", false, ""},
 	{opDevenvGC, "Garbage collect", "Clean obsolete devenv GC roots, then Nix GC", "devenv gc", true, ""},
-	{opDevenvUpdate, "Update environment", "Refresh devenv inputs and lock files (current project)", "devenv update", true, ""},
-	{opDevenvInfo, "Environment info", "Show information about the current devenv project (read-only)", "devenv info", false, ""},
+	{opDevenvUpdate, "Update environment", "Refresh the selected project's inputs and lock files", "devenv update", true, ""},
+	{opDevenvInfo, "Environment info", "Show information about the selected project (read-only)", "devenv info", false, ""},
 }
 
 type menuItem struct {
@@ -137,6 +141,14 @@ type model struct {
 	// cleanup workflow
 	cleanChecks map[string]bool
 	cleanCursor int
+	// devenv environment selection
+	devenvRoot   string
+	devenvEnvs   []devenv.Environment
+	devenvEnv    *devenv.Environment
+	devenvErr    error
+	devenvCursor int
+	pendingOp    *opMeta
+	pendingClean bool
 	// animation
 	selY, selV  float64
 	spring      harmonica.Spring
@@ -169,13 +181,14 @@ func newModel() model {
 		spring:         harmonica.NewSpring(harmonica.FPS(60), 220.0, 22.0),
 		panelSpring:    harmonica.NewSpring(harmonica.FPS(60), 180.0, 20.0),
 		hmExpirePeriod: "30d",
+		devenvRoot:     devenv.DefaultProjectsDir(),
 	}
 }
 
 // Version is shown in the TUI header.
 const Version = "0.1.0"
 
-// Init starts the status dashboard load and the animation tick loop.
+// Init starts the status dashboard, devenv discovery and animation tick loop.
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.loadStatus(), animTickCmd())
+	return tea.Batch(m.loadStatus(), m.loadDevenvEnvs(), animTickCmd())
 }

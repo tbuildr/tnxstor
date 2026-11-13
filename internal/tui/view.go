@@ -56,6 +56,8 @@ func (m model) View() string {
 		body = m.viewResult()
 	case screenCleanup:
 		body = m.viewCleanup()
+	case screenDevenvEnvs:
+		body = m.viewDevenvEnvs(width - 6)
 	case screenHelp:
 		body = m.viewHelp()
 	default:
@@ -99,6 +101,8 @@ func (m model) contextLabel() string {
 		return "Result"
 	case screenCleanup:
 		return "Clean up"
+	case screenDevenvEnvs:
+		return "devenv"
 	case screenHelp:
 		return "Help"
 	}
@@ -131,6 +135,8 @@ func (m model) viewFooter(width int) string {
 		pairs = [][2]string{{"↑↓", "choose"}, {"y", "confirm"}, {"n/Esc", "cancel"}}
 	case screenCleanup:
 		pairs = [][2]string{{"Space", "toggle"}, {"Enter", "run"}, {"d", "dry-run"}, {"Esc", "back"}}
+	case screenDevenvEnvs:
+		pairs = [][2]string{{"↑↓", "navigate"}, {"Enter", "select"}, {"r", "rescan"}, {"Esc", "back"}}
 	case screenHelp:
 		pairs = [][2]string{{"Esc", "back"}, {"q", "quit"}}
 	case screenStatus:
@@ -156,7 +162,15 @@ func (m model) viewMenu(width int) string {
 				if strings.TrimSpace(b.String()) != "" {
 					b.WriteString("\n")
 				}
-				b.WriteString(styleSection.Render(item.section) + "\n")
+				label := item.section
+				if label == "devenv" {
+					if m.devenvEnv != nil {
+						label += " · " + m.devenvEnv.Dir
+					} else {
+						label += " · no environment selected"
+					}
+				}
+				b.WriteString(styleSection.Render(clamp(label, width)) + "\n")
 				b.WriteString(styleDivider.Render(strings.Repeat("─", maxInt(4, width/2))) + "\n")
 				lastSection = item.section
 			}
@@ -165,7 +179,11 @@ func (m model) viewMenu(width int) string {
 		// coincides with the cursor; while moving it glides to the target.
 		if rows[i] == selectedRow {
 			line := styleBar.Render("▌") + styleItemSelected.Render(item.meta.title)
-			if d := strings.TrimSpace(item.meta.desc); d != "" {
+			desc := item.meta.desc
+			if item.meta.op == opDevenvSelect && m.devenvEnv != nil {
+				desc = "managing " + m.devenvEnv.Dir
+			}
+			if d := strings.TrimSpace(desc); d != "" {
 				line += "  " + styleDesc.Render(clamp("— "+d, width))
 			}
 			b.WriteString(line + "\n")
@@ -246,6 +264,9 @@ func (m model) viewConfirm() string {
 	var b strings.Builder
 	b.WriteString(styleHeader.Render(m.opMeta.title) + "\n\n")
 	b.WriteString(styleItem.Render(m.opMeta.desc) + "\n")
+	if isDevenvOp(m.opMeta.op) && m.devenvEnv != nil {
+		b.WriteString("\n" + styleDim.Render("directory") + " " + styleCode.Render(m.devenvEnv.Dir) + "\n")
+	}
 	if m.confirmNote != "" {
 		var warn strings.Builder
 		for _, line := range strings.Split(m.confirmNote, "\n") {
@@ -276,6 +297,68 @@ func (m model) viewRunning() string {
 	}
 	b.WriteString("  " + m.spin.View() + " working…" + "\n\n")
 	b.WriteString(styleDim.Render("Press Esc to cancel") + "\n")
+	return b.String()
+}
+
+func (m model) viewDevenvEnvs(width int) string {
+	var b strings.Builder
+	b.WriteString(styleHeader.Render("devenv environments") + "\n")
+	b.WriteString(styleDim.Render("root: "+m.devenvRoot) + "\n\n")
+	if m.devenvErr != nil {
+		b.WriteString(styleErr.Render("✗ "+m.devenvErr.Error()) + "\n\n")
+	}
+	if len(m.devenvEnvs) == 0 {
+		b.WriteString(styleDim.Render("No devenv environments found.") + "\n\n")
+		b.WriteString(styleDim.Render("Add a project with devenv.nix or devenv.yaml under the root,") + "\n")
+		b.WriteString(styleDim.Render("set TNXS_PROJECTS_DIR, or run tnxs from inside a project.") + "\n")
+		return b.String()
+	}
+
+	// Keep the list inside the terminal: show a window around the cursor
+	// rather than rendering an unbounded project list.
+	maxRows := m.height - 13
+	if maxRows < 3 {
+		maxRows = 3
+	}
+	start := 0
+	if m.devenvCursor >= maxRows {
+		start = m.devenvCursor - maxRows + 1
+	}
+	end := start + maxRows
+	if end > len(m.devenvEnvs) {
+		end = len(m.devenvEnvs)
+	}
+	if start > 0 {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
+	}
+	for i := start; i < end; i++ {
+		env := m.devenvEnvs[i]
+		label := clamp(env.Label(), maxInt(8, width/3))
+		dirWidth := width - len(label) - 10
+		if dirWidth < 8 {
+			dirWidth = 8
+		}
+		dir := styleDim.Render(clamp(env.Dir, dirWidth))
+		suffix := ""
+		if env.Current {
+			suffix = " " + styleOk.Render("current")
+		}
+		if i == m.devenvCursor {
+			b.WriteString(styleBar.Render("▌") + styleItemSelected.Render(label) + "  " + dir + suffix + "\n")
+		} else {
+			b.WriteString("  " + styleItem.Render(label) + "  " + dir + suffix + "\n")
+		}
+	}
+	if end < len(m.devenvEnvs) {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  ↓ %d more", len(m.devenvEnvs)-end)) + "\n")
+	}
+	b.WriteString("\n" + styleDim.Render("Select the environment these devenv operations manage.") + "\n")
+	if m.pendingOp != nil {
+		b.WriteString(styleDim.Render("Then continuing with: ") + styleItem.Render(m.pendingOp.title) + "\n")
+	}
+	if m.pendingClean {
+		b.WriteString(styleDim.Render("Then continuing with the cleanup plan.") + "\n")
+	}
 	return b.String()
 }
 
@@ -354,6 +437,9 @@ func (m model) viewCleanup() string {
 		var pb strings.Builder
 		for i, s := range steps {
 			fmt.Fprintf(&pb, "%d. %s\n", i+1, s.Command)
+			if s.Dir != "" {
+				fmt.Fprintf(&pb, "   in %s\n", s.Dir)
+			}
 		}
 		b.WriteString(styleCommandBox.Render(strings.TrimRight(pb.String(), "\n")) + "\n")
 	} else {
@@ -368,6 +454,7 @@ func (m model) viewCleanup() string {
 func currentPlan(m model) operations.CleanPlan {
 	return operations.CleanPlan{
 		DevenvGC:    m.cleanChecks["devenv-gc"],
+		DevenvDir:   m.devenvDir(),
 		HMExpire:    m.cleanChecks["hm-expire"],
 		HMOlderThan: m.hmExpirePeriod,
 		GC:          m.cleanChecks["gc"],
@@ -396,6 +483,7 @@ func (m model) viewHelp() string {
 		b.WriteString(fmt.Sprintf("  %-8s %s\n", styleKey.Render(r[0]), styleItem.Render(r[1])))
 	}
 	b.WriteString("\n" + styleDim.Render("Destructive operations always ask for confirmation.") + "\n")
+	b.WriteString(styleDim.Render("devenv operations act on the environment selected in the devenv section.") + "\n")
 	b.WriteString(styleDim.Render("Nothing is ever deleted directly from /nix/store; Nix decides.") + "\n")
 	return b.String()
 }

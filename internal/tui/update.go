@@ -43,6 +43,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case devenvEnvsLoadedMsg:
+		m.devenvRoot = msg.root
+		m.devenvEnvs = msg.envs
+		m.devenvErr = msg.err
+		if m.devenvCursor >= len(m.devenvEnvs) {
+			m.devenvCursor = maxInt(0, len(m.devenvEnvs)-1)
+		}
+		// Keep an explicit user selection; otherwise prefer the project
+		// containing the current directory, then a sole environment.
+		if m.devenvEnv == nil {
+			switch {
+			case msg.current != nil:
+				env := *msg.current
+				m.devenvEnv = &env
+			case len(msg.envs) == 1:
+				env := msg.envs[0]
+				m.devenvEnv = &env
+			}
+		}
+		return m, nil
+
 	case opDoneMsg:
 		if m.opCancel != nil {
 			m.opCancel()
@@ -102,6 +123,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case screenGenerations, screenResult:
 		return m.resultKey(key)
+	case screenDevenvEnvs:
+		return m.devenvKey(key)
 	case screenConfirm:
 		return m.confirmKey(key)
 	case screenRunning:
@@ -149,7 +172,7 @@ func (m model) menuKey(key string) (tea.Model, tea.Cmd) {
 		m.prev = screenMenu
 		m.screen = screenHelp
 	case "r":
-		return m, m.loadStatus()
+		return m, tea.Batch(m.loadStatus(), m.loadDevenvEnvs())
 	case "c":
 		m.screen = screenCleanup
 		m.cleanCursor = 0
@@ -170,8 +193,25 @@ func (m model) selectOperation(meta opMeta) (tea.Model, tea.Cmd) {
 	case opNone:
 		m.screen = screenStatus
 		return m, m.loadStatus()
-	case opDead, opRoots, opLive, opHMGenerations, opDevenvInfo, opDevenvUpdate:
+	case opDevenvSelect:
+		m.pendingOp = nil
+		m.pendingClean = false
+		m.screen = screenDevenvEnvs
+		return m, m.loadDevenvEnvs()
+	case opDead, opRoots, opLive, opHMGenerations:
 		return beginOp(m, meta.op)
+	case opDevenvGC, opDevenvUpdate, opDevenvInfo:
+		if m.devenvEnv == nil {
+			// Ask for a target first, then continue with the chosen task.
+			pending := meta
+			m.pendingOp = &pending
+			m.pendingClean = false
+			m.screen = screenDevenvEnvs
+			return m, m.loadDevenvEnvs()
+		}
+		if meta.op == opDevenvInfo {
+			return beginOp(m, meta.op)
+		}
 	case opHMExpire:
 		if m.dryRun {
 			return beginOp(m, opHMExpire)
@@ -210,6 +250,48 @@ func (m model) confirmKey(key string) (tea.Model, tea.Cmd) {
 		return m.runConfirmed()
 	case "enter":
 		return m.runConfirmed()
+	}
+	return m, nil
+}
+
+func (m model) devenvKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "backspace":
+		m.screen = screenMenu
+		m.pendingOp = nil
+		m.pendingClean = false
+	case "up", "k":
+		if m.devenvCursor > 0 {
+			m.devenvCursor--
+		}
+	case "down", "j":
+		if m.devenvCursor < len(m.devenvEnvs)-1 {
+			m.devenvCursor++
+		}
+	case "g":
+		m.devenvCursor = 0
+	case "G":
+		m.devenvCursor = maxInt(0, len(m.devenvEnvs)-1)
+	case "r":
+		return m, m.loadDevenvEnvs()
+	case "enter":
+		if len(m.devenvEnvs) == 0 {
+			return m, nil
+		}
+		env := m.devenvEnvs[m.devenvCursor]
+		m.devenvEnv = &env
+		m.screen = screenMenu
+		if m.pendingClean {
+			m.pendingClean = false
+			m.pendingOp = nil
+			m.ex.Opts.DryRun = m.dryRun
+			return beginOp(m, opClean)
+		}
+		if m.pendingOp != nil {
+			meta := *m.pendingOp
+			m.pendingOp = nil
+			return m.selectOperation(meta)
+		}
 	}
 	return m, nil
 }
@@ -271,6 +353,12 @@ func (m model) cleanupKey(key string) (tea.Model, tea.Cmd) {
 		m.dryRun = !m.dryRun
 	case "enter":
 		m.ex.Opts.DryRun = m.dryRun
+		if m.cleanChecks["devenv-gc"] && m.devenvEnv == nil {
+			m.pendingClean = true
+			m.pendingOp = nil
+			m.screen = screenDevenvEnvs
+			return m, m.loadDevenvEnvs()
+		}
 		return beginOp(m, opClean)
 	}
 	return m, nil

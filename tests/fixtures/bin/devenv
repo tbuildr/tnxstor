@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fake devenv for tnxstor integration tests.
 if [ -n "$TNXS_TEST_LOG" ]; then echo "devenv $*" >> "$TNXS_TEST_LOG"; fi
+if [ -n "$TNXS_TEST_CWD_LOG" ]; then echo "$PWD" >> "$TNXS_TEST_CWD_LOG"; fi
 case "$1" in
   gc)
     echo "Cleaning obsolete devenv GC roots..."

@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"tnxstor/internal/devenv"
 	"tnxstor/internal/operations"
 	"tnxstor/internal/runner"
 )
@@ -216,5 +217,45 @@ func TestMenuSingleHighlightOnFreshStart(t *testing.T) {
 	view := m.viewMenu(70)
 	if got := strings.Count(view, "▌"); got != 1 {
 		t.Errorf("fresh start: expected 1 highlight (Status), got %d:\n%s", got, view)
+	}
+}
+
+// TestDevenvSelectionTargetsOperation verifies that choosing an environment
+// in the picker becomes the working directory for devenv operations and is
+// shown in the menu.
+func TestDevenvSelectionTargetsOperation(t *testing.T) {
+	alpha := devenv.Environment{Name: "alpha", Dir: "/home/tester/Projects/alpha"}
+	beta := devenv.Environment{Name: "team/beta", Dir: "/home/tester/Projects/team/beta"}
+	m := newModel()
+	m.devenvEnvs = []devenv.Environment{alpha, beta}
+	m.devenvCursor = 1
+	m.screen = screenDevenvEnvs
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(model)
+	if m.devenvEnv == nil || m.devenvEnv.Dir != beta.Dir {
+		t.Fatalf("selected env = %+v, want %s", m.devenvEnv, beta.Dir)
+	}
+	view := m.viewMenu(70)
+	if !strings.Contains(view, beta.Dir) {
+		t.Errorf("menu must name the managed directory:\n%s", view)
+	}
+
+	f := runner.NewFake()
+	f.ScriptCmd("devenv info", "Name: beta")
+	m.ex = &operations.Executor{R: f}
+	msg := m.runOp(opDevenvInfo)()
+	done, ok := msg.(opDoneMsg)
+	if !ok {
+		t.Fatalf("expected opDoneMsg, got %T", msg)
+	}
+	if done.res.err != nil {
+		t.Fatal(done.res.err)
+	}
+	if len(f.Calls) != 1 || f.Calls[0].Dir != beta.Dir {
+		t.Fatalf("calls = %+v, want devenv info in %s", f.Calls, beta.Dir)
+	}
+	if !strings.Contains(done.res.summary, beta.Dir) {
+		t.Errorf("result summary must name the directory: %q", done.res.summary)
 	}
 }
